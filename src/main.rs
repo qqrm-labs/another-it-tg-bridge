@@ -1,8 +1,9 @@
+mod checkpoint;
 mod telegram;
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, Utc};
-use log::{info, warn};
+use log::info;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -58,6 +59,7 @@ async fn main() -> Result<()> {
     }
 
     let mut sent_urls = load_state(&state_path)?;
+    persist_state(&state_path, &sent_urls, false)?;
     let mut new_articles: Vec<Article> = articles
         .into_iter()
         .filter(|article| !sent_urls.contains(&article.url))
@@ -69,16 +71,34 @@ async fn main() -> Result<()> {
 
     if new_articles.is_empty() {
         retain_recent(&mut sent_urls, state_window_start, today_msk);
-        persist_state(&state_path, &sent_urls)?;
+        persist_state(&state_path, &sent_urls, false)?;
         info!("no new posts");
         return Ok(());
     }
 
     let bot = TelegramBot::from_env()?;
-    let mut sent = 0usize;
-    let mut failed = 0usize;
+    let sent = deliver_articles(&bot, &new_articles, &state_path, &mut sent_urls).await?;
 
-    for article in &new_articles {
+    info!("sent {} new links", sent);
+
+    retain_recent(&mut sent_urls, state_window_start, today_msk);
+    persist_state(&state_path, &sent_urls, false)?;
+
+    Ok(())
+}
+
+async fn deliver_articles(
+    bot: &TelegramBot,
+    articles: &[Article],
+    state_path: &str,
+    sent_urls: &mut HashSet<String>,
+) -> Result<usize> {
+    let mut sent = 0usize;
+
+    for article in articles {
+        if sent_urls.contains(&article.url) {
+            continue;
+        }
         let text = match article
             .title
             .as_ref()
@@ -89,25 +109,14 @@ async fn main() -> Result<()> {
             None => article.url.clone(),
         };
 
-        if let Err(e) = bot.send_message(&text).await {
-            warn!("telegram error for {}: {e}", article.url);
-            failed += 1;
-            continue;
-        }
+        checkpoint::begin(Path::new(state_path), &article.url)?;
+        bot.send_message(&text).await?;
         sent_urls.insert(article.url.clone());
+        persist_state(state_path, sent_urls, true)?;
         sent += 1;
     }
 
-    info!("sent {} new links, failed {}", sent, failed);
-
-    retain_recent(&mut sent_urls, state_window_start, today_msk);
-    persist_state(&state_path, &sent_urls)?;
-
-    if failed > 0 {
-        anyhow::bail!("telegram delivery failed for {} links", failed);
-    }
-
-    Ok(())
+    Ok(sent)
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,12 +299,19 @@ fn extract_date(url: &str) -> Option<NaiveDate> {
 
 fn load_state(path: &str) -> Result<HashSet<String>> {
     match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect()),
+        Ok(contents) => {
+            let urls: HashSet<String> = contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect();
+            anyhow::ensure!(
+                urls.iter().all(|url| extract_date(url).is_some()),
+                "Invalid delivery state; reconcile before sending"
+            );
+            Ok(urls)
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HashSet::new()),
         Err(err) => Err(err).context("failed to read state file"),
     }
@@ -306,19 +322,96 @@ fn retain_recent(sent_urls: &mut HashSet<String>, window_start: NaiveDate, today
         .retain(|url| extract_date(url).is_some_and(|date| date >= window_start && date <= today));
 }
 
-fn persist_state(path: &str, sent_urls: &HashSet<String>) -> Result<()> {
+fn persist_state(path: &str, sent_urls: &HashSet<String>, confirmed: bool) -> Result<()> {
     if let Some(parent) = Path::new(path).parent() {
         fs::create_dir_all(parent).context("failed to create state directory")?;
     }
     let mut urls: Vec<String> = sent_urls.iter().cloned().collect();
     urls.sort();
     let payload = urls.join("\n");
-    fs::write(path, payload).context("failed to write state file")
+    let save = if confirmed {
+        checkpoint::confirm
+    } else {
+        checkpoint::save
+    };
+    save(Path::new(path), payload.as_bytes()).context("failed to checkpoint state file")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_batch_keeps_confirmed_progress_and_sends_plain_text() {
+        use mockito::Matcher;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.txt");
+        let path = path.to_str().unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let bot = TelegramBot::new("TOKEN", "42").with_base_url(server.url());
+        let date = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
+        let articles = vec![
+            Article {
+                title: Some("A < B & C".into()),
+                url: "https://another-it.ru/2026/10/14/first/".into(),
+                date,
+            },
+            Article {
+                title: None,
+                url: "https://another-it.ru/2026/10/14/second/".into(),
+                date,
+            },
+        ];
+        let first = server.mock("POST", "/botTOKEN/sendMessage")
+            .match_body("chat_id=42&text=A+%3C+B+%26+C%0Ahttps%3A%2F%2Fanother-it.ru%2F2026%2F10%2F14%2Ffirst%2F")
+            .with_body(r#"{"ok":true}"#).expect(1).create_async().await;
+        let second = server
+            .mock("POST", "/botTOKEN/sendMessage")
+            .match_body(Matcher::UrlEncoded("text".into(), articles[1].url.clone()))
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut state = HashSet::new();
+        assert!(deliver_articles(&bot, &articles, path, &mut state)
+            .await
+            .is_err());
+        assert!(deliver_articles(&bot, &articles, path, &mut state)
+            .await
+            .is_err());
+        first.assert_async().await;
+        second.assert_async().await;
+        second.remove_async().await;
+        // The mock definitively rejected the second send. An operator has reconciled it.
+        fs::remove_file(Path::new(path).with_extension("pending")).unwrap();
+        let mut restored = load_state(path).unwrap();
+        assert!(restored.contains(&articles[0].url));
+        assert!(!restored.contains(&articles[1].url));
+        let retry = server
+            .mock("POST", "/botTOKEN/sendMessage")
+            .match_body(Matcher::UrlEncoded("text".into(), articles[1].url.clone()))
+            .with_body(r#"{"ok":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        assert_eq!(
+            deliver_articles(&bot, &articles, path, &mut restored)
+                .await
+                .unwrap(),
+            1
+        );
+        first.assert_async().await;
+        retry.assert_async().await;
+        assert_eq!(load_state(path).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn corrupt_state_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.txt");
+        fs::write(&path, "not a publication URL").unwrap();
+        assert!(load_state(path.to_str().unwrap()).is_err());
+    }
 
     #[test]
     fn parses_debug_date_with_dashes() {

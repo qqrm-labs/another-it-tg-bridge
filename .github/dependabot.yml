@@ -1,25 +1,35 @@
 version: 2
-updates:
-  - package-ecosystem: "cargo"
-    directory: "/"
+multi-ecosystem-groups:
+  maintenance:
     schedule:
       interval: "weekly"
       day: "monday"
       time: "12:00"
       timezone: "Europe/Moscow"
 
+updates:
   - package-ecosystem: "github-actions"
     directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "12:30"
-      timezone: "Europe/Moscow"
+    patterns: ["*"]
+    multi-ecosystem-group: "maintenance"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: "maintenance"
+    cooldown:
+      default-days: 7
+    groups:
+      security:
+        applies-to: "security-updates"
+        patterns: ["*"]
 
   - package-ecosystem: "rust-toolchain"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-      time: "13:00"
+      time: "12:00"
       timezone: "Europe/Moscow"

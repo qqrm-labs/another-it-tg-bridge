@@ -11,15 +11,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
-      - name: Upload binary to release
-        uses: ncipollo/release-action@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          tag: latest
-          commit: ${{ github.sha }}
-          allowUpdates: true
-          replacesArtifacts: true
-          artifacts: target/release/another-it-tg-bridge
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+      - run: cargo build --release --locked
+      - name: Upload binary to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest --title latest --notes 'Automated latest build'
+          fi
+          python3 .github/scripts/release_manifest.py create target/release/another-it-tg-bridge delivery-manifest.json
+          gh release upload latest target/release/another-it-tg-bridge --clobber
+          gh release upload latest delivery-manifest.json --clobber

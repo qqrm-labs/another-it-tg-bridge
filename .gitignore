@@ -1,2 +1,9 @@
 target/
 state/
+
+# Local delivery recovery markers and Python test cache
+*.pending
+*.checkpoint-tmp
+__pycache__/
+*.remote-sha
+*.remote-sha.tmp
