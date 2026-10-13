@@ -5,46 +5,66 @@ on:
     - cron: '0 9 * * *'
   workflow_dispatch:
 
+concurrency:
+  group: production-delivery
+  cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     environment: prod
     permissions:
-      contents: read
+      contents: write
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore durable publication state
+        id: durable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELIVERY_STATE_KEY: sent_urls.txt
+        run: |
+          status=0
+          python3 .github/scripts/delivery_state.py restore state/sent_urls.txt || status=$?
+          if [ "$status" = 3 ]; then
+            echo 'bootstrap=true' >> "$GITHUB_OUTPUT"
+          elif [ "$status" != 0 ]; then
+            exit "$status"
+          fi
 
       - name: Restore state cache
+        if: steps.durable.outputs.bootstrap == 'true'
         id: state-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: state
           key: another-it-sent-urls-v1-${{ github.run_number }}
           restore-keys: |
             another-it-sent-urls-v1-
 
+      - name: Require migrated state
+        run: test -f state/sent_urls.txt
+
       - name: Download binary
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl -L -H "Authorization: Bearer $GITHUB_TOKEN" \
+          curl --fail --silent --show-error -L -H "Authorization: Bearer $GITHUB_TOKEN" \
             -o another-it-tg-bridge \
             "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/another-it-tg-bridge"
           chmod +x another-it-tg-bridge
 
       - name: Run
         env:
+          DELIVERY_CHECKPOINT: .github/scripts/delivery_state.py
+          DELIVERY_STATE_KEY: sent_urls.txt
+          GH_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
           GOOGLE_CSE_API_KEY: ${{ secrets.GOOGLE_CSE_API_KEY }}
           GOOGLE_CSE_CX: ${{ secrets.GOOGLE_CSE_CX }}
           RUST_LOG: info
         run: ./another-it-tg-bridge
-
-      - name: Save state cache
-        if: always()
-        uses: actions/cache/save@v6
-        with:
-          path: state
-          key: another-it-sent-urls-v1-${{ github.run_number }}
