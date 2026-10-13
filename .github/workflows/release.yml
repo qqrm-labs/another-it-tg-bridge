@@ -23,4 +23,6 @@ jobs:
           if ! gh release view latest >/dev/null 2>&1; then
             gh release create latest --title latest --notes 'Automated latest build'
           fi
+          python3 .github/scripts/release_manifest.py create target/release/another-it-tg-bridge delivery-manifest.json
           gh release upload latest target/release/another-it-tg-bridge --clobber
+          gh release upload latest delivery-manifest.json --clobber

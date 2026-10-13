@@ -84,3 +84,5 @@ Cargo and Actions updates share a weekly Dependabot maintenance batch with a sev
 Existing release and delivery triggers are preserved. A merge performed using `GITHUB_TOKEN` does not guarantee a follow-up push workflow. Guaranteed automatic post-merge releases need a separate GitHub App token or verified release controller; this change does not claim that coverage.
 
 The confirmed application state is a sorted list of canonical article URLs. Titles are sent as plain text, including literal `<` and `&`. To reconcile a delivered article, add its URL to that list before clearing pending.
+
+The release publishes `delivery-manifest.json` (protocol 1, source commit, SHA-256) alongside the binary. Posting verifies both protocol and hash before execution. Missing old manifests and asset-update races fail closed; wait for the normal release to finish before retrying.

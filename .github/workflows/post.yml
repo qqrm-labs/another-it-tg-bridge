@@ -55,6 +55,9 @@ jobs:
           curl --fail --silent --show-error -L -H "Authorization: Bearer $GITHUB_TOKEN" \
             -o another-it-tg-bridge \
             "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/another-it-tg-bridge"
+          curl --fail --silent --show-error -L -o delivery-manifest.json \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/delivery-manifest.json"
+          python3 .github/scripts/release_manifest.py verify another-it-tg-bridge delivery-manifest.json
           chmod +x another-it-tg-bridge
 
       - name: Run
