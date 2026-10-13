@@ -86,3 +86,5 @@ Existing release and delivery triggers are preserved. A merge performed using `G
 The confirmed application state is a sorted list of canonical article URLs. Titles are sent as plain text, including literal `<` and `&`. To reconcile a delivered article, add its URL to that list before clearing pending.
 
 The release publishes `delivery-manifest.json` (protocol 1, source commit, SHA-256) alongside the binary. Posting verifies both protocol and hash before execution. Missing old manifests and asset-update races fail closed; wait for the normal release to finish before retrying.
+
+Every mutation compares the remote blob SHA with the snapshot recorded at restore (or the prior successful write). A stale runner cannot replace newer progress, even across branches; a SHA conflict stops before another send.
